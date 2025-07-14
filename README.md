@@ -28,9 +28,7 @@
 ---
 
 ## 演示截图
-<p align="center">
-  <img src="https://xxx.com/xxx.gif" width="800">
-</p>
+无
 
 ---
 
