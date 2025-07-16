@@ -37,7 +37,7 @@ RUN_DIR   = Path(sys.executable).parent if IS_FROZEN else Path(__file__).resolve
 
 API_URL = "https://www.hyhdt.com/api/getipaddress.ashx"
 APPID   = "ipsearch"
-APPKEY  = "vufXpD16tWbIKH9nlocteUzNu%2bvuvbPCKB%2fOx%2fcUryM%3d"   # 保留官方示例中已编码的形式
+APPKEY  = "此处填入key"   # 保留官方示例中已编码的形式
 MAX_NUM = 50      # 接口一次最多 50 个
 
 CONFIG_FILE = RUN_DIR / "config.ini"
