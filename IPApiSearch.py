@@ -14,8 +14,10 @@ from typing import List, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
+from urllib.parse import quote
 import pandas as pd
 from pandas import DataFrame
+import ipaddress
 
 from PyQt5.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QObject,
@@ -32,6 +34,11 @@ from PyQt5.QtWidgets import (
 IS_FROZEN = getattr(sys, "frozen", False)
 RSC_DIR   = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 RUN_DIR   = Path(sys.executable).parent if IS_FROZEN else Path(__file__).resolve().parent
+
+API_URL = "https://www.hyhdt.com/api/getipaddress.ashx"
+APPID   = "ipsearch"
+APPKEY  = "vufXpD16tWbIKH9nlocteUzNu%2bvuvbPCKB%2fOx%2fcUryM%3d"   # 保留官方示例中已编码的形式
+MAX_NUM = 50      # 接口一次最多 50 个
 
 CONFIG_FILE = RUN_DIR / "config.ini"
 CACHE_FILE  = RUN_DIR / "cache.db"
@@ -89,22 +96,31 @@ class CacheDB:
             cur = self.conn.cursor()
             cur.execute("""CREATE TABLE IF NOT EXISTS ip_cache(
                               ip TEXT PRIMARY KEY,
-                              country TEXT, region TEXT, city TEXT,
+                              country TEXT, region TEXT, city TEXT, area TEXT,
                               ts INTEGER)""")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_ts ON ip_cache(ts)")
             self.conn.commit()
 
     def fetch(self, ips: List[str]) -> Dict[str, Dict]:
+        """
+        分批查询缓存，避免 999 占位符限制
+        """
         if not ips:
             return {}
-        q = "SELECT ip,country,region,city FROM ip_cache WHERE ip IN (%s)" % (
-            ",".join("?" * len(ips))
-        )
+
+        chunk = 800                      # 每次最多 800 条，留出安全余量
+        out: Dict[str, Dict] = {}
+        q_tpl = "SELECT ip,country,region,city,area FROM ip_cache WHERE ip IN ({})"
+
         with self.lock:
             cur = self.conn.cursor()
-            cur.execute(q, ips)
-            return {ip: dict(country=c, region=r, city=ci)
-                    for ip, c, r, ci in cur.fetchall()}
+            for i in range(0, len(ips), chunk):
+                sub = ips[i:i + chunk]
+                q = q_tpl.format(",".join("?" * len(sub)))
+                cur.execute(q, sub)
+                for ip, country, region, city, area in cur.fetchall():
+                    out[ip] = dict(country=country, region=region, city=city, area=area)
+        return out
 
     def save(self, mapping: Dict[str, Dict]):
         if not mapping:
@@ -113,9 +129,10 @@ class CacheDB:
                  d.get("country", ""),
                  d.get("region", ""),
                  d.get("city", ""),
+                 d.get("area", ""),
                  int(time.time())) for ip, d in mapping.items()]
         with self.lock:
-            self.conn.executemany("REPLACE INTO ip_cache VALUES(?,?,?,?,?)", rows)
+            self.conn.executemany("REPLACE INTO ip_cache VALUES(?,?,?,?,?,?)", rows)
             self.conn.commit()
 
     def cleanup(self, days: int = 30):
@@ -153,7 +170,7 @@ class PandasModel(QAbstractTableModel):
         self.endResetModel()
 
 # ─────────────── 并发解析 Worker ───────────────
-BATCH_SIZE  = 100   # ip-api.com 限制
+BATCH_SIZE  = 50
 MAX_WORKERS = 6
 
 class ParseWorker(QObject):
@@ -185,22 +202,46 @@ class ParseWorker(QObject):
         self.finished.emit(out)
 
     def _query_batch(self, ip_list: List[str]) -> Dict[str, Dict]:
-        url = "http://ip-api.com/batch"
-        params = {
-            "fields": "status,country,regionName,city",
-             "lang":   "zh-CN"          # ← 新增
-        }
-        r = self._session.post(url, json=ip_list, params=params, timeout=8)
+        """
+        ip_list 上限 50 条。IPv6 要编码，IPv4 原样。
+        返回 {ip: {country, region, city, area}}
+        """
+        if len(ip_list) > MAX_NUM:
+            raise ValueError(f"一次最多 {MAX_NUM} 个 IP")
+
+        # 1) 处理 ips 参数
+        ips_param = ",".join(
+            quote(ip, safe="") if ":" in ip else ip   # 只有 IPv6 编码
+            for ip in ip_list
+        )
+
+        # 2) 手动拼 URL，避免再次 urlencode
+        url = (f"{API_URL}"
+            f"?appid={APPID}"
+            f"&appkey={APPKEY}"
+            f"&ips={ips_param}")
+
+        r = self._session.get(url, timeout=8)
         r.raise_for_status()
-        data = r.json()
+        j = r.json()
+
+        if j.get("code") != 200:
+            raise RuntimeError(f"接口返回错误: {j}")
+
+        # 3) 解析结果，把 '-' 转成空串
         mapping = {}
-        for ip, rec in zip(ip_list, data):
-            if rec.get("status") == "success":
-                mapping[ip] = dict(country=rec.get("country", ""),
-                                   region=rec.get("regionName", ""),
-                                   city=rec.get("city", ""))
-            else:
-                mapping[ip] = dict(country="", region="", city="")
+        for rec in j["data"]:
+            mapping[rec["ip"]] = dict(
+                country = (rec.get("country") or "").replace("-", ""),
+                region  = (rec.get("region")  or "").replace("-", ""),
+                city    = (rec.get("city")    or "").replace("-", ""),
+                area    = (rec.get("area")    or "").replace("-", "")
+            )
+
+        # 4) 没返回的 IP 用空值补上，保持与请求列表长度一致
+        for ip in ip_list:
+            mapping.setdefault(ip, dict(country="", region="", city="", area=""))
+
         return mapping
 
 # ─────────────── 主窗口 ───────────────
@@ -323,6 +364,9 @@ class MainWindow(QMainWindow):
                .dropna()
                .unique()
                .tolist())
+        
+        # 仅保留合法 IPv4 / IPv6
+        ips = [ip for ip in ips if _is_valid_ip(ip)]
 
         cached = self.cache.fetch(ips)
         missing = [ip for ip in ips if ip not in cached]
@@ -349,10 +393,22 @@ class MainWindow(QMainWindow):
         self.pbar.hide()
         self.cache.save(data)
         self._merge_result(data)
+        self.thread.quit()
+        self.thread.wait()     # 等待线程彻底结束
+    
+    def closeEvent(self, e):
+        if hasattr(self, "thread") and self.thread.isRunning():
+            QMessageBox.information(self, "提示", "仍在解析，请稍候…")
+            e.ignore()
+            return
+        super().closeEvent(e)
 
     def _merge_result(self, new_data: Dict[str, Dict]):
-        join = lambda d: " ".join([d.get("country", ""), d.get("region", ""), d.get("city", "")]).strip()
+        def join(d):
+            parts = [d.get("country", ""), d.get("region", ""), d.get("city", ""), d.get("area", "")]
+            return " ".join([p for p in parts if p]).strip()
         mapping = {ip: join(v) for ip, v in new_data.items()}
+        # print({ip: join(v) for ip, v in new_data.items()})
 
         for it in self.list_cols.selectedItems():
             col = it.text()
@@ -391,6 +447,16 @@ class MainWindow(QMainWindow):
             self.load_excels(paths)
 
 # ─────────────── utils ───────────────
+def _is_valid_ip(s: str) -> bool:
+    """
+    判断字符串是否为合法 IPv4 / IPv6
+    """
+    try:
+        ipaddress.ip_address(s)
+        return True
+    except ValueError:
+        return False
+
 def open_path(p: Path):
     import subprocess, os, platform
     if platform.system() == "Windows":

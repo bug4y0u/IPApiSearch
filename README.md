@@ -4,8 +4,8 @@
 核心特点：
 
 * 拖拽导入任意 Excel (`.xls` / `.xlsx`)  
-* ip-api.com **批量接口 + 多线程**，1000 IP ≈ 4-6 秒  
-* `lang=zh-CN` —— 结果直接返回中文  
+* hyhdt.com **批量接口 + 多线程**，1000 IP ≈ 4–6 秒  
+* 结果直接返回中文  
 * 查询结果自动写入新列 `<原列名>_归属地`  
 * SQLite 本地缓存，避免重复请求，可一键清理  
 * 左右面板、表格列宽 **均可拖动调整**  
@@ -24,6 +24,7 @@
 6. [配置文件](#配置文件)  
 7. [文件结构](#文件结构)  
 8. [常见问题](#常见问题)  
+9. [更新日志](#更新日志)  
 
 ---
 
@@ -46,7 +47,7 @@ Python ≥ 3.8，Windows / macOS / Linux 通用。
 ## 快速开始
 
 ```bash  
-python ip_local_gui.py  
+python IPApiSearch.py  
 ```
 
 * 首次启动会在程序同目录生成  
@@ -65,8 +66,8 @@ python ip_local_gui.py
 
 | 功能 | 说明 |
 | ---- | ---- |
-| 批量请求 | 使用 `ip-api.com/batch`，一次 100 条，`ThreadPoolExecutor` 默认 6 线程 |
-| 中文归属地 | 请求参数 `lang=zh-CN`，无需自行转换 |
+| 批量请求 | 使用 `https://www.hyhdt.com/api/getipaddress.ashx`，一次 ≤ 50 条，`ThreadPoolExecutor` 默认 6 线程 |
+| 中文归属地 | 接口直接返回中文字段 |
 | 列拖动 | 左右面板：`QSplitter`；表格列：`QHeaderView.Interactive` |
 | 本地缓存 | 自动写入 / 读取 `cache.db`，避免重复查询；菜单可清理 30 天前记录 |
 | 日志 | `logs/app.log`，捕获所有请求错误、异常栈 |
@@ -86,7 +87,7 @@ pip install pyinstaller
 生成单文件可执行（Windows 为例）：
 
 ```bash  
-pyinstaller -F -w -i favicon.ico ip_local_gui.py  
+pyinstaller -F -w -i favicon.ico IPApiSearch.py  
 ```
 
 首次运行时会在 EXE 所在目录生成 `config.ini / cache.db / logs/`。
@@ -100,11 +101,10 @@ pyinstaller -F -w -i favicon.ico ip_local_gui.py
 ```ini  
 [credential]  
 appid  = ipsearch  
-appkey = xxx%xxx%xxx
+appkey = UzNu%2bPCKB%2fOx%2UyM%3d  
 ```
 
-* 程序目前不使用 `appkey`；如需对接自家接口，可在 `ip_local_gui.py`  
-  `ParseWorker._query_batch()` 中读取并替换。  
+* `appkey` 在官方示例中已做百分号编码，**请勿再次 urlencode**。  
 * 使用 `RawConfigParser`，`%` 无需转义。
 
 ---
@@ -112,7 +112,7 @@ appkey = xxx%xxx%xxx
 ## 文件结构
 
 ```  
-├─ ip_local_gui.py         # 主程序（单文件）  
+├─ IPApiSearch.py         # 主程序（单文件）  
 ├─ favicon.ico             # 可选图标  
 ├─ cache.db                # 查询缓存（首次运行自动创建）  
 ├─ config.ini              # 配置文件（首次运行自动创建）  
@@ -134,3 +134,40 @@ A : 免费接口有并发 / 秒级速率限制。可在顶部常量 `MAX_WORKERS
 A : 目标列含非法 IP 或接口返回失败即为空，可在日志查看原因。
 
 ---
+
+## 更新日志
+
+### v1.1.0 – 2025-07-16  
+**切换接口 + 稳定性增强**
+
+1. **接口替换**  
+   • 从 `ip-api.com/batch` 切换至 `hyhdt.com/getipaddress.ashx`，一次 ≤ 50 条。  
+   • 仅对 IPv6 做 URL-Encode；IPv4 原样。手工拼 URL，杜绝二次编码导致的 `code 300 参数错误`。
+
+2. **合法 IP 过滤**  
+   • 利用 `ipaddress` 标准库，仅保留合法 IPv4 / IPv6。  
+   • Excel 列名、空白行等非 IP 再不会写入接口。
+
+3. **线程安全退出**  
+   • 新增 `MainWindow.closeEvent()`：解析线程未结束时阻止关闭窗口，彻底消灭 `QThread: Destroyed while thread is still running`。
+
+4. **结果解析**  
+   • 接口中的占位符 `-` 统一替换为空串。  
+   • 新增 `area` 字段并拼接到最终地址。
+
+5. **其它**  
+   • 日志中记录完整请求 URL 与返回 JSON，方便排错。  
+   • README、配置文件示例同步更新。
+
+升级后示例输出：
+
+```json  
+{  
+  "183.192.75.244": "中国 广东省 深圳市 南山区",  
+  "39.188.218.96":  "中国 江苏省 南京市 建邺区" 
+}  
+```
+
+---
+
+Happy coding! 🚀
